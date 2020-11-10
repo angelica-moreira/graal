@@ -161,14 +161,14 @@ public class CAnnotationProcessor {
         if (Platform.includedIn(Platform.LINUX.class)) {
             options.addAll(LibCBase.singleton().getAdditionalQueryCodeCompilerOptions());
         }
-        compilerInvoker.compileAndParseError(SubstrateOptions.StrictQueryCodeCompilation.getValue(), options, queryFile, binary, this::reportCompilerError, nativeLibs.debug);
+        compilerInvoker.compileAndParseError(SubstrateOptions.StrictQueryCodeCompilation.getValue(), options, queryFile, binary, this::reportCompilerError);
         return binary;
     }
 
     protected void reportCompilerError(ProcessBuilder current, Path queryFile, String line) {
         for (String header : codeCtx.getDirectives().getHeaderFiles()) {
             if (line.contains(header.substring(1, header.length() - 1) + ": No such file or directory")) {
-                UserError.abort("Basic header file missing (" + header + "). Make sure headers are available on your system.");
+                UserError.abort("Basic header file missing (%s). Make sure headers are available on your system.", header);
             }
         }
         List<Object> elements = new ArrayList<>();

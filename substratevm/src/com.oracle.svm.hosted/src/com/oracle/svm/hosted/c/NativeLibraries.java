@@ -26,6 +26,7 @@ package com.oracle.svm.hosted.c;
 
 import java.io.IOException;
 import java.lang.reflect.AnnotatedElement;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -50,6 +51,9 @@ import org.graalvm.compiler.api.replacements.SnippetReflectionProvider;
 import org.graalvm.compiler.debug.DebugContext;
 import org.graalvm.compiler.hotspot.JVMCIVersionCheck;
 import org.graalvm.compiler.serviceprovider.JavaVersionUtil;
+import org.graalvm.compiler.word.BarrieredAccess;
+import org.graalvm.compiler.word.ObjectAccess;
+import org.graalvm.compiler.word.Word;
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.c.CContext;
@@ -66,8 +70,10 @@ import org.graalvm.word.PointerBase;
 import org.graalvm.word.SignedWord;
 import org.graalvm.word.UnsignedWord;
 import org.graalvm.word.WordBase;
+import org.graalvm.word.WordFactory;
 
 import com.oracle.graal.pointsto.infrastructure.WrappedElement;
+import com.oracle.graal.pointsto.meta.AnalysisType;
 import com.oracle.svm.core.OS;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.SubstrateTargetDescription;
@@ -76,6 +82,7 @@ import com.oracle.svm.core.config.ConfigurationValues;
 import com.oracle.svm.core.jdk.PlatformNativeLibrarySupport;
 import com.oracle.svm.core.option.OptionUtils;
 import com.oracle.svm.core.util.UserError;
+import com.oracle.svm.hosted.ImageClassLoader;
 import com.oracle.svm.hosted.NativeImageOptions;
 import com.oracle.svm.hosted.c.info.ElementInfo;
 import com.oracle.svm.hosted.classinitialization.ClassInitializationSupport;
@@ -195,8 +202,7 @@ public final class NativeLibraries {
                 return;
             }
             if (discovered.contains(dep)) {
-                String message = String.format("While building list of static libraries dependencies a cycle was discovered for dependency: %s ", dep.getName());
-                UserError.abort(message);
+                UserError.abort("While building list of static libraries dependencies a cycle was discovered for dependency: %s ", dep.getName());
             }
 
             discovered.add(dep);
@@ -230,14 +236,19 @@ public final class NativeLibraries {
         errors = new ArrayList<>();
         compilationUnitToContext = new HashMap<>();
 
-        wordBaseType = metaAccess.lookupJavaType(WordBase.class);
-        signedType = metaAccess.lookupJavaType(SignedWord.class);
-        unsignedType = metaAccess.lookupJavaType(UnsignedWord.class);
-        pointerBaseType = metaAccess.lookupJavaType(PointerBase.class);
-        stringType = metaAccess.lookupJavaType(String.class);
-        byteArrayType = metaAccess.lookupJavaType(byte[].class);
-        enumType = metaAccess.lookupJavaType(Enum.class);
-        locationIdentityType = metaAccess.lookupJavaType(LocationIdentity.class);
+        wordBaseType = lookupAndRegisterType(WordBase.class);
+        signedType = lookupAndRegisterType(SignedWord.class);
+        unsignedType = lookupAndRegisterType(UnsignedWord.class);
+        pointerBaseType = lookupAndRegisterType(PointerBase.class);
+        stringType = lookupAndRegisterType(String.class);
+        byteArrayType = lookupAndRegisterType(byte[].class);
+        enumType = lookupAndRegisterType(Enum.class);
+        locationIdentityType = lookupAndRegisterType(LocationIdentity.class);
+
+        lookupAndRegisterType(Word.class);
+        lookupAndRegisterType(WordFactory.class);
+        lookupAndRegisterType(ObjectAccess.class);
+        lookupAndRegisterType(BarrieredAccess.class);
 
         annotated = new LinkedHashSet<>();
 
@@ -256,6 +267,12 @@ public final class NativeLibraries {
         libraryPaths = initCLibraryPath();
 
         this.cache = new CAnnotationProcessorCache();
+    }
+
+    private ResolvedJavaType lookupAndRegisterType(Class<?> clazz) {
+        AnalysisType type = (AnalysisType) metaAccess.lookupJavaType(clazz);
+        type.registerAsReachable();
+        return type;
     }
 
     public MetaAccessProvider getMetaAccess() {
@@ -288,8 +305,6 @@ public final class NativeLibraries {
 
             if (Files.exists(platformDependentPath)) {
                 return platformDependentPath;
-            } else {
-                System.err.println("WARNING: Using an older version of the labsjdk-11.");
             }
         }
         return baseSearchPath;
@@ -333,7 +348,7 @@ public final class NativeLibraries {
                 }
                 String jdkDownloadURL = (JavaVersionUtil.JAVA_SPEC > 8 ? JVMCIVersionCheck.JVMCI11_RELEASES_URL : JVMCIVersionCheck.JVMCI8_RELEASES_URL);
                 UserError.guarantee(!Platform.includedIn(InternalPlatform.PLATFORM_JNI.class),
-                                "Building images for %s%s requires static JDK libraries.%Use the JDK from %s%n%s",
+                                "Building images for %s%s requires static JDK libraries.%nUse the JDK from %s%n%s",
                                 ImageSingletons.lookup(Platform.class).getClass().getName(),
                                 libCMessage,
                                 jdkDownloadURL,
@@ -390,8 +405,17 @@ public final class NativeLibraries {
         }
     }
 
-    public void addAnnotated(CLibrary library) {
-        annotated.add(library);
+    public void processCLibraryAnnotations(ImageClassLoader loader) {
+        for (Class<?> clazz : loader.findAnnotatedClasses(CLibrary.class, false)) {
+            if (makeContext(getDirectives(metaAccess.lookupJavaType(clazz))).isInConfiguration()) {
+                annotated.add(clazz.getAnnotation(CLibrary.class));
+            }
+        }
+        for (Method method : loader.findAnnotatedMethods(CLibrary.class)) {
+            if (makeContext(getDirectives(metaAccess.lookupJavaType(method.getDeclaringClass()))).isInConfiguration()) {
+                annotated.add(method.getAnnotation(CLibrary.class));
+            }
+        }
     }
 
     public void addStaticJniLibrary(String library, String... dependencies) {
@@ -445,7 +469,7 @@ public final class NativeLibraries {
                                 .filter(path -> path.getFileName().toString().endsWith(libSuffix))
                                 .forEachOrdered(candidate -> allStaticLibs.put(candidate.getFileName(), candidate));
             } catch (IOException e) {
-                UserError.abort(e, "Invalid library path " + libraryPath);
+                UserError.abort(e, "Invalid library path %s", libraryPath);
             }
         }
         return allStaticLibs;
@@ -462,7 +486,7 @@ public final class NativeLibraries {
             try {
                 unit = ReflectionUtil.newInstance(compilationUnit);
             } catch (ReflectionUtilError ex) {
-                throw UserError.abort(ex.getCause(), "can't construct compilation unit " + compilationUnit.getCanonicalName());
+                throw UserError.abort(ex.getCause(), "Cannot construct compilation unit %s", compilationUnit.getCanonicalName());
             }
 
             if (classInitializationSupport != null) {
@@ -563,6 +587,10 @@ public final class NativeLibraries {
 
     public boolean isEnum(ResolvedJavaType type) {
         return enumType.isAssignableFrom(type);
+    }
+
+    public ResolvedJavaType enumType() {
+        return enumType;
     }
 
     public ResolvedJavaType getPointerBaseType() {

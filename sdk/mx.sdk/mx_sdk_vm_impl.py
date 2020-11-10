@@ -358,7 +358,7 @@ class BaseGraalVmLayoutDistribution(_with_metaclass(ABCMeta, mx.LayoutDistributi
                  path=None,
                  stage1=False,
                  **kw_args): # pylint: disable=super-init-not-called
-        self.components = components
+        self.components = components or registered_graalvm_components(stage1)
         layout = {}
         src_jdk_base = _src_jdk_base if add_jdk_base else '.'
         assert src_jdk_base
@@ -388,7 +388,7 @@ class BaseGraalVmLayoutDistribution(_with_metaclass(ABCMeta, mx.LayoutDistributi
 
         self.jimage_jars = set()
         if is_graalvm and _src_jdk_version >= 9:
-            for component in registered_graalvm_components(stage1):
+            for component in self.components:
                 self.jimage_jars.update(component.boot_jars + component.jvmci_parent_jars)
                 if isinstance(component, mx_sdk.GraalVmJvmciComponent):
                     self.jimage_jars.update(component.jvmci_jars)
@@ -585,13 +585,14 @@ class BaseGraalVmLayoutDistribution(_with_metaclass(ABCMeta, mx.LayoutDistributi
             else:
                 _add(layout, "<jre_base>/lib/<arch>/server/vm.properties", "string:name=" + vm_name)
 
-            if _src_jdk_version == 8 and any(comp.jvmci_parent_jars for comp in registered_graalvm_components(stage1)):
-                _add(layout, '<jre_base>/lib/jvmci/parentClassLoader.classpath', 'dependency:{}'.format(GraalVmJvmciParentClasspath.project_name()))
-
-            # Add release file
-            _sorted_suites = sorted(mx.suites(), key=lambda s: s.name)
-            _metadata = self._get_metadata(_sorted_suites, join(exclude_base, 'release'))
-            _add(layout, "<jdk_base>/release", "string:{}".format(_metadata))
+            if _src_jdk_version == 8:
+                # Generate and add the 'release' file.
+                # On JDK9+ this is done in GraalVmJImageBuildTask because it depends on the result of jlink.
+                _sorted_suites = sorted(mx.suites(), key=lambda s: s.name)
+                _metadata = self._get_metadata(_sorted_suites, join(exclude_base, 'release'))
+                _add(layout, "<jdk_base>/release", "string:{}".format(_metadata))
+                if any(comp.jvmci_parent_jars for comp in registered_graalvm_components(stage1)):
+                    _add(layout, '<jre_base>/lib/jvmci/parentClassLoader.classpath', 'dependency:{}'.format(GraalVmJvmciParentClasspath.project_name()))
 
         # Add the rest of the GraalVM
 
@@ -691,7 +692,7 @@ class BaseGraalVmLayoutDistribution(_with_metaclass(ABCMeta, mx.LayoutDistributi
                         _link_path = _add_link(_jdk_jre_bin, _link_dest, _component)
                         _jre_bin_names.append(basename(_link_path))
                 _add_native_image_macro(_launcher_config, _component)
-                if 'poly' in _components_set(stage1) and isinstance(_launcher_config, mx_sdk.LanguageLauncherConfig):
+                if 'poly' in _components_set(self.components, stage1) and isinstance(_launcher_config, mx_sdk.LanguageLauncherConfig):
                     _add(layout, _component_base, 'dependency:{}/polyglot.config'.format(launcher_project), _component)
             for _library_config in sorted(_get_library_configs(_component), key=lambda c: c.destination):
                 graalvm_dists.update(_library_config.jar_distributions)
@@ -849,16 +850,15 @@ else:
 
 
 class GraalVmLayoutDistribution(BaseGraalVmLayoutDistribution, LayoutSuper):  # pylint: disable=R0901
-    def __init__(self, base_name, theLicense=None, stage1=False, **kw_args):
+    def __init__(self, base_name, theLicense=None, stage1=False, components=None, **kw_args):
         self.base_name = base_name
-
-        name, base_dir, self.vm_config_name = _get_graalvm_configuration(base_name, stage1)
+        name, base_dir, self.vm_config_name = _get_graalvm_configuration(base_name, components=components, stage1=stage1)
 
         super(GraalVmLayoutDistribution, self).__init__(
             suite=_suite,
             name=name,
             deps=[],
-            components=registered_graalvm_components(stage1),
+            components=components,
             is_graalvm=True,
             exclLibs=[],
             platformDependent=True,
@@ -874,8 +874,8 @@ class GraalVmLayoutDistribution(BaseGraalVmLayoutDistribution, LayoutSuper):  # 
         return GraalVmLayoutDistributionTask(args, self, 'latest_graalvm', 'latest_graalvm_home')
 
 
-def _components_set(stage1):
-    components = registered_graalvm_components(stage1)
+def _components_set(components=None, stage1=False):
+    components = components or registered_graalvm_components(stage1)
     components_set = set([c.short_name for c in components])
     if stage1:
         components_set.add('stage1')
@@ -895,10 +895,10 @@ def _components_set(stage1):
 _graal_vm_configs_cache = {}
 
 
-def _get_graalvm_configuration(base_name, stage1=False):
+def _get_graalvm_configuration(base_name, components=None, stage1=False):
     key = base_name, stage1
     if key not in _graal_vm_configs_cache:
-        components_set = _components_set(stage1)
+        components_set = _components_set(components, stage1)
 
         # Use custom distribution name and base dir for registered vm configurations
         vm_dist_name = None
@@ -1437,7 +1437,7 @@ class GraalVmJImage(mx.Project):
             logical_root = out_dir
             for root, _, files in os.walk(out_dir):
                 for name in files:
-                    yield join(root, name), join(relpath(root, logical_root), name)
+                    yield join(root, name), relpath(join(root, name), logical_root)
 
 
 class GraalVmJImageBuildTask(mx.ProjectBuildTask):
@@ -1449,6 +1449,13 @@ class GraalVmJImageBuildTask(mx.ProjectBuildTask):
             return not isinstance(dep, mx.Dependency) or (_include_sources(dep.qualifiedName()) and dep.isJARDistribution() and not dep.is_stripped())
         vendor_info = {'vendor-version': graalvm_vendor_version(get_final_graalvm_distribution())}
         mx_sdk.jlink_new_jdk(_src_jdk, self.subject.output_directory(), self.subject.deps, with_source=with_source, vendor_info=vendor_info)
+
+        release_file = join(self.subject.output_directory(), 'release')
+        _sorted_suites = sorted(mx.suites(), key=lambda s: s.name)
+        _metadata = BaseGraalVmLayoutDistribution._get_metadata(_sorted_suites, release_file)
+        with open(release_file, 'w') as f:
+            f.write(_metadata)
+
         with open(self._config_file(), 'w') as f:
             f.write('\n'.join(self._config()))
 
@@ -1659,7 +1666,7 @@ class GraalVmLanguageLauncher(GraalVmLauncher):  # pylint: disable=too-many-ance
             yield e
             if single:
                 return
-        if 'poly' in _components_set(self.stage1):
+        if 'poly' in _components_set(stage1=self.stage1):
             out = self.polyglot_config_output_file()
             yield out, basename(out)
 
@@ -1699,7 +1706,7 @@ class GraalVmNativeImageBuildTask(_with_metaclass(ABCMeta, mx.ProjectBuildTask))
         return self._polyglot_config_contents
 
     def with_polyglot_config(self):
-        return isinstance(self.subject.native_image_config, mx_sdk.LanguageLauncherConfig) and 'poly' in _components_set(self.subject.stage1)
+        return isinstance(self.subject.native_image_config, mx_sdk.LanguageLauncherConfig) and 'poly' in _components_set(stage1=self.subject.stage1)
 
     def native_image_needs_build(self, out_file):
         # TODO check if definition has changed
@@ -2205,7 +2212,7 @@ def _platform_classpath(cp_entries):
 
 
 def get_stage1_graalvm_distribution_name():
-    name, _, _ = _get_graalvm_configuration('GraalVM', True)
+    name, _, _ = _get_graalvm_configuration('GraalVM', stage1=True)
     return name
 
 
@@ -2498,7 +2505,7 @@ def print_graalvm_components(args):
     parser = ArgumentParser(prog='mx graalvm-components', description='Print the list of GraalVM components')
     parser.add_argument('--stage1', action='store_true', help='print the list of components for the stage1 distribution')
     args = parser.parse_args(args)
-    components = _components_set(args.stage1)
+    components = _components_set(stage1=args.stage1)
     print(sorted(components))
 
 

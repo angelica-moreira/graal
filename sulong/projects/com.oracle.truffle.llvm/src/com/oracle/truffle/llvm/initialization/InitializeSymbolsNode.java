@@ -37,6 +37,7 @@ import com.oracle.truffle.llvm.parser.model.functions.FunctionSymbol;
 import com.oracle.truffle.llvm.parser.model.symbols.globals.GlobalVariable;
 import com.oracle.truffle.llvm.runtime.LLVMContext;
 import com.oracle.truffle.llvm.runtime.LLVMFunction;
+import com.oracle.truffle.llvm.runtime.LLVMFunctionCode;
 import com.oracle.truffle.llvm.runtime.LLVMFunctionDescriptor;
 import com.oracle.truffle.llvm.runtime.LLVMIntrinsicProvider;
 import com.oracle.truffle.llvm.runtime.LLVMLanguage;
@@ -78,13 +79,15 @@ public final class InitializeSymbolsNode extends LLVMNode {
 
     @Child LLVMAllocateNode allocRoSection;
     @Child LLVMAllocateNode allocRwSection;
-    @Child LLVMCheckSymbolNode checkGlobals;
-    @Child LLVMWriteSymbolNode writeSymbols;
 
     @Children final AllocGlobalNode[] allocGlobals;
     final String moduleName;
 
     @Children final AllocSymbolNode[] allocFuncs;
+
+    @Children final LLVMWriteSymbolNode[] writeGlobals;
+    @Children final LLVMWriteSymbolNode[] writeFunctions;
+    @Children final LLVMCheckSymbolNode[] checkGlobals;
 
     private final LLVMScope fileScope;
     private final NodeFactory nodeFactory;
@@ -96,7 +99,6 @@ public final class InitializeSymbolsNode extends LLVMNode {
         DataLayout dataLayout = result.getDataLayout();
         this.nodeFactory = nodeFactory;
         this.fileScope = result.getRuntime().getFileScope();
-        this.checkGlobals = LLVMCheckSymbolNodeGen.create();
         this.globalLength = result.getSymbolTableSize();
         this.bitcodeID = result.getRuntime().getBitcodeID();
         this.moduleName = moduleName;
@@ -106,18 +108,25 @@ public final class InitializeSymbolsNode extends LLVMNode {
         DataSection roSection = new DataSection(dataLayout);
         DataSection rwSection = new DataSection(dataLayout);
         ArrayList<AllocGlobalNode> allocGlobalsList = new ArrayList<>();
+        ArrayList<LLVMWriteSymbolNode> writeGlobalsList = new ArrayList<>();
+        ArrayList<LLVMCheckSymbolNode> checkGlobalsList = new ArrayList<>();
         LLVMIntrinsicProvider intrinsicProvider = LLVMLanguage.getLanguage().getCapability(LLVMIntrinsicProvider.class);
 
         for (GlobalVariable global : result.getDefinedGlobals()) {
             Type type = global.getType().getPointeeType();
+            LLVMSymbol symbol = fileScope.get(global.getName());
             if (isSpecialGlobalSlot(type)) {
                 allocGlobalsList.add(new AllocPointerGlobalNode(global));
+                writeGlobalsList.add(LLVMWriteSymbolNodeGen.create(symbol));
+                checkGlobalsList.add(LLVMCheckSymbolNodeGen.create(symbol));
             } else {
                 // allocate at least one byte per global (to make the pointers unique)
                 if (type.getSize(dataLayout) == 0) {
                     type = PrimitiveType.getIntegerType(8);
                 }
                 allocGlobalsList.add(new AllocOtherGlobalNode(global, type, roSection, rwSection));
+                writeGlobalsList.add(LLVMWriteSymbolNodeGen.create(symbol));
+                checkGlobalsList.add(LLVMCheckSymbolNodeGen.create(symbol));
             }
         }
 
@@ -127,22 +136,29 @@ public final class InitializeSymbolsNode extends LLVMNode {
          */
 
         ArrayList<AllocSymbolNode> allocFuncsAndAliasesList = new ArrayList<>();
+        ArrayList<LLVMWriteSymbolNode> writeFunctionsList = new ArrayList<>();
         for (FunctionSymbol functionSymbol : result.getDefinedFunctions()) {
             LLVMFunction function = fileScope.getFunction(functionSymbol.getName());
+            LLVMFunctionCode functionCode = new LLVMFunctionCode(function);
             // Internal libraries in the llvm library path are allowed to have intriniscs.
             if (isInternalSulongLibrary && intrinsicProvider.isIntrinsified(function.getName())) {
-                allocFuncsAndAliasesList.add(new AllocIntrinsicFunctionNode(function, nodeFactory, intrinsicProvider));
+                allocFuncsAndAliasesList.add(new AllocIntrinsicFunctionNode(function, functionCode, nodeFactory, intrinsicProvider));
+                writeFunctionsList.add(LLVMWriteSymbolNodeGen.create(function));
             } else if (lazyParsing) {
-                allocFuncsAndAliasesList.add(new AllocLLVMFunctionNode(function));
+                allocFuncsAndAliasesList.add(new AllocLLVMFunctionNode(function, functionCode));
+                writeFunctionsList.add(LLVMWriteSymbolNodeGen.create(function));
             } else {
-                allocFuncsAndAliasesList.add(new AllocLLVMEagerFunctionNode(function));
+                allocFuncsAndAliasesList.add(new AllocLLVMEagerFunctionNode(function, functionCode));
+                writeFunctionsList.add(LLVMWriteSymbolNodeGen.create(function));
             }
         }
         this.allocRoSection = roSection.getAllocateNode(nodeFactory, "roglobals_struct", true);
         this.allocRwSection = rwSection.getAllocateNode(nodeFactory, "rwglobals_struct", false);
         this.allocGlobals = allocGlobalsList.toArray(AllocGlobalNode.EMPTY);
         this.allocFuncs = allocFuncsAndAliasesList.toArray(AllocSymbolNode.EMPTY);
-        this.writeSymbols = LLVMWriteSymbolNodeGen.create();
+        this.writeGlobals = writeGlobalsList.toArray(LLVMWriteSymbolNode.EMPTY);
+        this.checkGlobals = checkGlobalsList.toArray(LLVMCheckSymbolNode.EMPTY);
+        this.writeFunctions = writeFunctionsList.toArray(LLVMWriteSymbolNode.EMPTY);
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -174,16 +190,18 @@ public final class InitializeSymbolsNode extends LLVMNode {
     private void allocGlobals(LLVMContext context, LLVMPointer roBase, LLVMPointer rwBase) {
         for (int i = 0; i < allocGlobals.length; i++) {
             AllocGlobalNode allocGlobal = allocGlobals[i];
+            LLVMWriteSymbolNode writeSymbols = writeGlobals[i];
+            LLVMCheckSymbolNode checkSymbols = checkGlobals[i];
             LLVMGlobal descriptor = fileScope.getGlobalVariable(allocGlobal.name);
             if (descriptor == null) {
                 CompilerDirectives.transferToInterpreter();
                 throw new IllegalStateException(String.format("Global variable %s not found", allocGlobal.name));
             }
-            if (!checkGlobals.execute(descriptor)) {
+            if (!checkSymbols.execute()) {
                 // because of our symbol overriding support, it can happen that the global was
                 // already bound before to a different target location
                 LLVMPointer ref = allocGlobal.allocate(context, roBase, rwBase);
-                writeSymbols.execute(ref, descriptor);
+                writeSymbols.execute(ref);
                 List<LLVMSymbol> list = new ArrayList<>();
                 list.add(descriptor);
                 context.registerSymbolReverseMap(list, ref);
@@ -195,8 +213,9 @@ public final class InitializeSymbolsNode extends LLVMNode {
     private void allocFunctions(LLVMContext ctx) {
         for (int i = 0; i < allocFuncs.length; i++) {
             AllocSymbolNode allocSymbol = allocFuncs[i];
+            LLVMWriteSymbolNode writeSymbols = writeFunctions[i];
             LLVMPointer pointer = allocSymbol.allocate(ctx);
-            writeSymbols.execute(pointer, allocSymbol.symbol);
+            writeSymbols.execute(pointer);
             List<LLVMSymbol> list = new ArrayList<>();
             list.add(allocSymbol.symbol);
             ctx.registerSymbolReverseMap(list, pointer);
@@ -284,13 +303,16 @@ public final class InitializeSymbolsNode extends LLVMNode {
      */
     static final class AllocLLVMFunctionNode extends AllocSymbolNode {
 
-        AllocLLVMFunctionNode(LLVMFunction function) {
+        private final LLVMFunctionCode functionCode;
+
+        AllocLLVMFunctionNode(LLVMFunction function, LLVMFunctionCode functionCode) {
             super(function);
+            this.functionCode = functionCode;
         }
 
         @CompilerDirectives.TruffleBoundary
         private LLVMFunctionDescriptor createAndResolve(LLVMContext context) {
-            return context.createFunctionDescriptor(symbol.asFunction());
+            return context.createFunctionDescriptor(symbol.asFunction(), functionCode);
         }
 
         @Override
@@ -302,13 +324,16 @@ public final class InitializeSymbolsNode extends LLVMNode {
 
     static final class AllocLLVMEagerFunctionNode extends AllocSymbolNode {
 
-        AllocLLVMEagerFunctionNode(LLVMFunction function) {
+        private final LLVMFunctionCode functionCode;
+
+        AllocLLVMEagerFunctionNode(LLVMFunction function, LLVMFunctionCode functionCode) {
             super(function);
+            this.functionCode = functionCode;
         }
 
         @CompilerDirectives.TruffleBoundary
         private LLVMFunctionDescriptor createAndResolve(LLVMContext context) {
-            LLVMFunctionDescriptor functionDescriptor = context.createFunctionDescriptor(symbol.asFunction());
+            LLVMFunctionDescriptor functionDescriptor = context.createFunctionDescriptor(symbol.asFunction(), functionCode);
             functionDescriptor.getFunctionCode().resolveIfLazyLLVMIRFunction();
             return functionDescriptor;
         }
@@ -324,16 +349,18 @@ public final class InitializeSymbolsNode extends LLVMNode {
 
         private final NodeFactory nodeFactory;
         LLVMIntrinsicProvider intrinsicProvider;
+        private final LLVMFunctionCode functionCode;
 
-        AllocIntrinsicFunctionNode(LLVMFunction function, NodeFactory nodeFactory, LLVMIntrinsicProvider intrinsicProvider) {
+        AllocIntrinsicFunctionNode(LLVMFunction function, LLVMFunctionCode functionCode, NodeFactory nodeFactory, LLVMIntrinsicProvider intrinsicProvider) {
             super(function);
+            this.functionCode = functionCode;
             this.nodeFactory = nodeFactory;
             this.intrinsicProvider = intrinsicProvider;
         }
 
         @CompilerDirectives.TruffleBoundary
         private LLVMFunctionDescriptor createAndDefine(LLVMContext context) {
-            LLVMFunctionDescriptor functionDescriptor = context.createFunctionDescriptor(symbol.asFunction());
+            LLVMFunctionDescriptor functionDescriptor = context.createFunctionDescriptor(symbol.asFunction(), functionCode);
             if (intrinsicProvider.isIntrinsified(symbol.getName())) {
                 functionDescriptor.getFunctionCode().define(intrinsicProvider, nodeFactory);
                 return functionDescriptor;

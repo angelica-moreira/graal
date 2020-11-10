@@ -1,10 +1,10 @@
 suite = {
-  "mxversion" : "5.270.0",
+  "mxversion" : "5.275.4",
   "name" : "compiler",
   "sourceinprojectwhitelist" : [],
 
   "groupId" : "org.graalvm.compiler",
-  "version" : "20.3.0",
+  "version" : "21.0.0",
   "release" : False,
   "url" : "http://www.graalvm.org/",
   "developer" : {
@@ -210,6 +210,7 @@ suite = {
         "jdk.internal.vm.ci" : [
           "jdk.vm.ci.meta",
           "jdk.vm.ci.code",
+          "jdk.vm.ci.code.site",
           "jdk.vm.ci.services",
           "jdk.vm.ci.runtime",
         ],
@@ -230,6 +231,7 @@ suite = {
         "jdk.internal.vm.ci" : [
           "jdk.vm.ci.meta",
           "jdk.vm.ci.code",
+          "jdk.vm.ci.code.site",
           "jdk.vm.ci.services",
           "jdk.vm.ci.runtime",
         ],
@@ -398,29 +400,7 @@ suite = {
       "multiReleaseJarVersion" : "11",
       "checkPackagePrefix" : "false",
       "checkstyle" : "org.graalvm.compiler.graph",
-      "javaCompliance" : "11..12",
-      "workingSets" : "API,Graal",
-    },
-
-    "org.graalvm.libgraal.jdk13" : {
-      "subDir" : "src",
-      "sourceDirs" : ["src"],
-      "dependencies" : [
-          "org.graalvm.libgraal",
-          "sdk:GRAAL_SDK",
-          "JVMCI_HOTSPOT",
-      ],
-      "requiresConcealed" : {
-        "jdk.internal.vm.ci" : [
-          "jdk.vm.ci.services",
-          "jdk.vm.ci.hotspot"
-        ],
-      },
-      "overlayTarget" : "org.graalvm.libgraal",
-      "multiReleaseJarVersion" : "13",
-      "checkPackagePrefix" : "false",
-      "checkstyle" : "org.graalvm.compiler.graph",
-      "javaCompliance" : "13+",
+      "javaCompliance" : "11+",
       "workingSets" : "API,Graal",
     },
 
@@ -1330,7 +1310,10 @@ suite = {
     "org.graalvm.compiler.phases.common" : {
       "subDir" : "src",
       "sourceDirs" : ["src"],
-      "dependencies" : ["org.graalvm.compiler.phases"],
+      "dependencies" : [
+        "org.graalvm.compiler.loop",
+        "org.graalvm.compiler.phases"
+      ],
       "annotationProcessors" : [
         "GRAAL_PROCESSOR",
       ],
@@ -1420,7 +1403,6 @@ suite = {
       "subDir" : "src",
       "sourceDirs" : ["src"],
       "dependencies" : [
-     "org.graalvm.compiler.loop",
      "org.graalvm.compiler.phases.common",
        ],
       "annotationProcessors" : ["GRAAL_PROCESSOR"],
@@ -1745,7 +1727,6 @@ suite = {
       ],
       "javaCompliance" : "8+",
       "workingSets" : "Graal,Truffle",
-      "jacoco" : "exclude",
     },
 
     "org.graalvm.compiler.truffle.options" : {
@@ -1762,17 +1743,6 @@ suite = {
       "javaCompliance" : "8+",
       "workingSets" : "Graal,Truffle",
       "jacoco" : "exclude",
-    },
-
-    "org.graalvm.compiler.truffle.common.processor" : {
-      "subDir" : "src",
-      "sourceDirs" : ["src"],
-      "dependencies" : [
-        "org.graalvm.compiler.options.processor",
-      ],
-      "checkstyle" : "org.graalvm.compiler.graph",
-      "javaCompliance" : "8+",
-      "workingSets" : "Graal,Truffle",
     },
 
     "org.graalvm.compiler.truffle.compiler" : {
@@ -1794,7 +1764,6 @@ suite = {
       ],
       "javaCompliance" : "8+",
       "workingSets" : "Graal,Truffle",
-      "jacoco" : "exclude",
     },
 
     "org.graalvm.compiler.truffle.compiler.amd64" : {
@@ -1810,7 +1779,6 @@ suite = {
       ],
       "javaCompliance" : "8+",
       "workingSets" : "Graal,Truffle",
-      "jacoco" : "exclude",
     },
 
     "org.graalvm.compiler.truffle.runtime.serviceprovider" : {
@@ -2304,7 +2272,6 @@ suite = {
       "dependencies" : [
         "org.graalvm.compiler.processor",
         "org.graalvm.compiler.options.processor",
-        "org.graalvm.compiler.truffle.common.processor",
         "org.graalvm.compiler.serviceprovider.processor",
         "org.graalvm.compiler.nodeinfo.processor",
         "org.graalvm.compiler.replacements.processor",
@@ -2385,6 +2352,7 @@ suite = {
           "org.graalvm.compiler.truffle.compiler.substitutions.TruffleInvocationPluginProvider",
           "org.graalvm.compiler.truffle.runtime.LoopNodeFactory",
           "org.graalvm.compiler.truffle.runtime.TruffleTypes",
+          "org.graalvm.compiler.truffle.runtime.EngineCacheSupport",
           "org.graalvm.home.HomeFinder",
         ],
         "requiresConcealed" : {

@@ -263,7 +263,8 @@ public class ExportsParser extends AbstractParser<ExportsData> {
          */
         for (ExportMessageData exportedElement : exportedElements) {
             if (exportedElement.isOverriden()) {
-                // must not initialize overriden elements because otherwise the parsedNodeCache gets
+                // must not initialize overridden elements because otherwise the parsedNodeCache
+                // gets
                 // confused.
                 continue;
             }
@@ -374,6 +375,15 @@ public class ExportsParser extends AbstractParser<ExportsData> {
             }
         }
 
+        if (isGenerateSlowPathOnly(type)) {
+            for (ExportsLibrary libraryExports : model.getExportedLibraries().values()) {
+                for (ExportMessageData export : libraryExports.getExportedMessages().values()) {
+                    if (export.isClass() && export.getSpecializedNode() != null) {
+                        NodeParser.removeFastPathSpecializations(export.getSpecializedNode());
+                    }
+                }
+            }
+        }
         return model;
     }
 
@@ -438,8 +448,8 @@ public class ExportsParser extends AbstractParser<ExportsData> {
                 explicitReceiver = true;
             }
 
-            LibraryParser parser = new LibraryParser();
-            LibraryData libraryData = parser.parse(fromTypeMirror(libraryMirror));
+            Map<TypeElement, LibraryData> libraryCache = ProcessorContext.getInstance().getCacheMap(LibraryParser.class);
+            LibraryData libraryData = libraryCache.computeIfAbsent(fromTypeMirror(libraryMirror), (t) -> new LibraryParser().parse(t));
 
             ExportsLibrary lib = new ExportsLibrary(context, type, exportAnnotationMirror, model, libraryData, receiverClass, explicitReceiver);
             ExportsLibrary otherLib = model.getExportedLibraries().get(libraryId);

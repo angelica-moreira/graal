@@ -70,16 +70,18 @@ import com.oracle.truffle.api.CallTarget;
 import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
-import com.oracle.truffle.api.Scope;
 import com.oracle.truffle.api.TruffleLanguage.Env;
 import com.oracle.truffle.api.TruffleLogger;
 import com.oracle.truffle.api.dsl.Cached;
 import com.oracle.truffle.api.dsl.GenerateUncached;
 import com.oracle.truffle.api.dsl.Specialization;
+import com.oracle.truffle.api.exception.AbstractTruffleException;
 import com.oracle.truffle.api.frame.Frame;
 import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.interop.NodeLibrary;
 import com.oracle.truffle.api.interop.TruffleObject;
 import com.oracle.truffle.api.interop.UnsupportedMessageException;
+import com.oracle.truffle.api.nodes.EncapsulatingNodeReference;
 import com.oracle.truffle.api.nodes.ExplodeLoop;
 import com.oracle.truffle.api.nodes.LanguageInfo;
 import com.oracle.truffle.api.nodes.Node;
@@ -279,6 +281,14 @@ final class PolyglotLanguageContext implements PolyglotImpl.VMObject {
         }
     }
 
+    PolyglotLanguageInstance getLanguageInstanceOrNull() {
+        Lazy l = this.lazy;
+        if (l == null) {
+            return null;
+        }
+        return l.languageInstance;
+    }
+
     PolyglotLanguageInstance getLanguageInstance() {
         assert env != null;
         return lazy.languageInstance;
@@ -331,12 +341,13 @@ final class PolyglotLanguageContext implements PolyglotImpl.VMObject {
         if (this.hostBindings == null) {
             synchronized (this) {
                 if (this.hostBindings == null) {
-                    Object prev = context.engine.enterIfNeeded(context);
+                    Object prev = language.engine.enterIfNeeded(context);
                     try {
-                        Iterable<Scope> scopes = LANGUAGE.findTopScopes(env);
-                        this.hostBindings = this.asValue(PolyglotLanguageBindings.create(scopes));
+                        Object scope = LANGUAGE.getScope(env);
+                        assert InteropLibrary.getUncached().hasMembers(scope) : "Scope object must have members.";
+                        this.hostBindings = this.asValue(scope);
                     } finally {
-                        context.engine.leaveIfNeeded(prev, context);
+                        language.engine.leaveIfNeeded(prev, context);
                     }
                 }
             }
@@ -411,17 +422,17 @@ final class PolyglotLanguageContext implements PolyglotImpl.VMObject {
         language.freeInstance(lazy.languageInstance);
     }
 
-    Object enterThread(PolyglotThread thread) {
+    PolyglotContextImpl enterThread(PolyglotThread thread) {
         assert isInitialized();
         assert Thread.currentThread() == thread;
         synchronized (context) {
-            Object prev = context.engine.enter(context);
+            PolyglotContextImpl prev = context.engine.enter(context);
             lazy.activePolyglotThreads.add(thread);
             return prev;
         }
     }
 
-    void leaveThread(Object prev, PolyglotThread thread) {
+    void leaveThread(PolyglotContextImpl prev, PolyglotThread thread) {
         assert isInitialized();
         assert Thread.currentThread() == thread;
         synchronized (context) {
@@ -437,7 +448,7 @@ final class PolyglotLanguageContext implements PolyglotImpl.VMObject {
                 }
             }
             lazy.activePolyglotThreads.remove(thread);
-            context.engine.leave(prev, context);
+            language.engine.leave(prev, context);
             seenThreads.remove(thread);
         }
         EngineAccessor.INSTRUMENT.notifyThreadFinished(context.engine, context.creatorTruffleContext, thread);
@@ -649,9 +660,6 @@ final class PolyglotLanguageContext implements PolyglotImpl.VMObject {
                 LOG.log(Level.FINE, "Failed to patch context of language: {0}", this.language.getId());
                 return false;
             } catch (Throwable t) {
-                if (t instanceof ThreadDeath) {
-                    throw t;
-                }
                 LOG.log(Level.FINE, "Exception during patching context of language: {0}", this.language.getId());
                 // The conversion to the host exception happens in the
                 // PolyglotEngineImpl.createContext
@@ -778,19 +786,19 @@ final class PolyglotLanguageContext implements PolyglotImpl.VMObject {
         abstract Object execute(PolyglotLanguageContext context, Object receiver);
 
         @Specialization(guards = "receiver == null")
-        static Object doNull(PolyglotLanguageContext context, @SuppressWarnings("unused") Object receiver) {
-            return context.toGuestValue(receiver);
+        Object doNull(PolyglotLanguageContext context, @SuppressWarnings("unused") Object receiver) {
+            return context.toGuestValue(this, receiver);
         }
 
         @Specialization(guards = {"receiver != null", "receiver.getClass() == cachedReceiver"}, limit = "3")
-        static Object doCached(PolyglotLanguageContext context, Object receiver, @Cached("receiver.getClass()") Class<?> cachedReceiver) {
-            return context.toGuestValue(cachedReceiver.cast(receiver));
+        Object doCached(PolyglotLanguageContext context, Object receiver, @Cached("receiver.getClass()") Class<?> cachedReceiver) {
+            return context.toGuestValue(this, cachedReceiver.cast(receiver));
         }
 
         @Specialization(replaces = "doCached")
         @TruffleBoundary
-        static Object doUncached(PolyglotLanguageContext context, Object receiver) {
-            return context.toGuestValue(receiver);
+        Object doUncached(PolyglotLanguageContext context, Object receiver) {
+            return context.toGuestValue(this, receiver);
         }
     }
 
@@ -814,7 +822,7 @@ final class PolyglotLanguageContext implements PolyglotImpl.VMObject {
     }
 
     synchronized PolyglotValue lookupValueCache(Object guestValue) {
-        assert toGuestValue(guestValue) == guestValue : "Not a valid guest value: " + guestValue + ". Only interop values are allowed to be exported.";
+        assert toGuestValue(null, guestValue) == guestValue : "Not a valid guest value: " + guestValue + ". Only interop values are allowed to be exported.";
         Object prev = context.engine.enterIfNeeded(context);
         try {
             PolyglotValue cache = lazy.valueCache.computeIfAbsent(guestValue.getClass(), new Function<Class<?>, PolyglotValue>() {
@@ -847,7 +855,7 @@ final class PolyglotLanguageContext implements PolyglotImpl.VMObject {
             if (cachedClassLocal != Generic.class) {
                 if (cachedClassLocal == null) {
                     CompilerDirectives.transferToInterpreterAndInvalidate();
-                    if (languageContext.context.engine.boundEngine) {
+                    if (languageContext.context.engine.singleContext.isValid()) {
                         cachedClass = receiver.getClass();
                         cache = languageContext.lazy.valueCache.get(receiver.getClass());
                         if (cache == null) {
@@ -893,15 +901,14 @@ final class PolyglotLanguageContext implements PolyglotImpl.VMObject {
         return HostObject.forClass(receiver, this);
     }
 
-    Object toGuestValue(Object hostValue) {
+    Object toGuestValue(Node parentNode, Object hostValue) {
         if (hostValue instanceof Value) {
             Value receiverValue = (Value) hostValue;
             PolyglotValue valueImpl = (PolyglotValue) getAPIAccess().getImpl(receiverValue);
             PolyglotContextImpl valueContext = valueImpl.languageContext != null ? valueImpl.languageContext.context : null;
             Object valueReceiver = getAPIAccess().getReceiver(receiverValue);
             if (valueContext != this.context) {
-
-                valueReceiver = migrateValue(valueReceiver, valueContext);
+                valueReceiver = migrateValue(parentNode, valueReceiver, valueContext);
             }
             return valueReceiver;
         } else if (PolyglotImpl.isGuestPrimitive(hostValue)) {
@@ -917,19 +924,28 @@ final class PolyglotLanguageContext implements PolyglotImpl.VMObject {
         } else if (hostValue.getClass().isArray()) {
             return HostObject.forObject(hostValue, this);
         } else if (HostWrapper.isInstance(hostValue)) {
-            return migrateHostWrapper(HostWrapper.asInstance(hostValue));
+            return migrateHostWrapper(parentNode, HostWrapper.asInstance(hostValue));
         } else {
             return HostInteropReflect.asTruffleViaReflection(hostValue, this);
         }
     }
 
-    private Object migrateValue(Object value, PolyglotContextImpl valueContext) {
+    @SuppressWarnings("serial")
+    static final class ValueMigrationException extends AbstractTruffleException {
+
+        ValueMigrationException(String message, Node location) {
+            super(message, location);
+        }
+
+    }
+
+    private Object migrateValue(Node parentNode, Object value, PolyglotContextImpl valueContext) {
         // migration of guest primitives is already handled.
         if (PolyglotImpl.isGuestPrimitive(value)) {
             // allowed to be passed freely
             return value;
         } else if (HostObject.isInstance(value)) {
-            return ((HostObject) value).withContext(this);
+            return HostObject.withContext(value, this);
         } else if (PolyglotProxy.isProxyGuestObject(value)) {
             return value;
         } else if (valueContext == null) {
@@ -941,18 +957,22 @@ final class PolyglotLanguageContext implements PolyglotImpl.VMObject {
             return value;
         } else {
             CompilerDirectives.transferToInterpreterAndInvalidate();
-            throw PolyglotEngineException.illegalArgument(String.format("The value '%s' cannot be passed from one context to another. " +
+            Node nodeContext = parentNode;
+            if (nodeContext == null || nodeContext.getRootNode() == null) {
+                nodeContext = EncapsulatingNodeReference.getCurrent().get();
+            }
+            throw new ValueMigrationException(String.format("The value '%s' cannot be passed from one context to another. " +
                             "The current context is 0x%x and the argument value originates from context 0x%x.",
-                            PolyglotValue.getValueInfo(null, value), context.hashCode(), valueContext.hashCode()));
+                            PolyglotValue.getValueInfo(null, value), context.hashCode(), valueContext.hashCode()), nodeContext);
         }
     }
 
-    private Object migrateHostWrapper(HostWrapper wrapper) {
+    private Object migrateHostWrapper(Node parentNode, HostWrapper wrapper) {
         Object wrapped = wrapper.getGuestObject();
         PolyglotContextImpl valueContext = wrapper.getContext();
         if (valueContext != this.context) {
             // migrate wrapped value to the context
-            wrapped = migrateValue(wrapped, valueContext);
+            wrapped = migrateValue(parentNode, wrapped, valueContext);
         }
         return wrapped;
     }
@@ -1030,13 +1050,13 @@ final class PolyglotLanguageContext implements PolyglotImpl.VMObject {
         return true;
     }
 
-    private boolean validScopedView(Object result) {
+    private boolean validScopedView(Object result, Node location) {
         InteropLibrary lib = InteropLibrary.getFactory().getUncached(result);
         Class<?> languageClass = EngineAccessor.LANGUAGE.getLanguage(env).getClass();
         try {
             assert lib.hasLanguage(result) &&
                             lib.getLanguage(result) == languageClass : String.format("The returned scoped view of language '%s' must return the class '%s' for InteropLibrary.getLanguage." +
-                                            "Fix the implementation of %s.getScopedView to resolve this.", languageClass.getTypeName(), languageClass.getTypeName(), languageClass.getTypeName());
+                                            "Fix the implementation of %s.getView to resolve this.", languageClass.getTypeName(), languageClass.getTypeName(), location.getClass().getTypeName());
         } catch (UnsupportedMessageException e) {
             throw shouldNotReachHere(e);
         }
@@ -1052,8 +1072,8 @@ final class PolyglotLanguageContext implements PolyglotImpl.VMObject {
     public Object getScopedView(Node location, Frame frame, Object value) {
         validateLocationAndFrame(language.info, location, frame);
         Object languageView = getLanguageView(value);
-        Object result = EngineAccessor.LANGUAGE.getScopedView(env, location, frame, languageView);
-        assert validScopedView(result);
+        Object result = NodeLibrary.getUncached().getView(location, frame, languageView);
+        assert validScopedView(result, location);
         return result;
     }
 

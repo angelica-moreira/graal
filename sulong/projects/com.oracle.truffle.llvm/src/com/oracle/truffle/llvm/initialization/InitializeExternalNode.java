@@ -38,6 +38,7 @@ import com.oracle.truffle.llvm.parser.model.GlobalSymbol;
 import com.oracle.truffle.llvm.parser.model.functions.FunctionSymbol;
 import com.oracle.truffle.llvm.runtime.LLVMContext;
 import com.oracle.truffle.llvm.runtime.LLVMFunction;
+import com.oracle.truffle.llvm.runtime.LLVMFunctionCode;
 import com.oracle.truffle.llvm.runtime.LLVMIntrinsicProvider;
 import com.oracle.truffle.llvm.runtime.LLVMLanguage;
 import com.oracle.truffle.llvm.runtime.LLVMLocalScope;
@@ -79,13 +80,15 @@ import java.util.ArrayList;
  * @see InitializeOverwriteNode
  */
 public final class InitializeExternalNode extends LLVMNode {
-    @Child LLVMWriteSymbolNode writeSymbols;
     @Children AllocExternalSymbolNode[] allocExternalSymbols;
+    @Children final LLVMWriteSymbolNode[] writeSymbols;
+
     private final NodeFactory nodeFactory;
 
     public InitializeExternalNode(LLVMParserResult result) {
         this.nodeFactory = result.getRuntime().getNodeFactory();
         LLVMScope fileScope = result.getRuntime().getFileScope();
+        ArrayList<LLVMWriteSymbolNode> writeSymbolsList = new ArrayList<>();
         ArrayList<AllocExternalSymbolNode> allocExternaSymbolsList = new ArrayList<>();
 
         // Bind all functions that are not defined/resolved as either a bitcode function
@@ -93,18 +96,21 @@ public final class InitializeExternalNode extends LLVMNode {
         for (FunctionSymbol symbol : result.getExternalFunctions()) {
             String name = symbol.getName();
             LLVMFunction function = fileScope.getFunction(name);
+            LLVMFunctionCode functionCode = new LLVMFunctionCode(function);
             if (name.startsWith("llvm.") || name.startsWith("__builtin_") || name.equals("polyglot_get_arg") || name.equals("polyglot_get_arg_count")) {
                 continue;
             }
-            allocExternaSymbolsList.add(AllocExternalFunctionNodeGen.create(function, nodeFactory));
+            allocExternaSymbolsList.add(AllocExternalFunctionNodeGen.create(function, functionCode, nodeFactory));
+            writeSymbolsList.add(LLVMWriteSymbolNodeGen.create(function));
         }
 
         for (GlobalSymbol symbol : result.getExternalGlobals()) {
             LLVMGlobal global = fileScope.getGlobalVariable(symbol.getName());
             allocExternaSymbolsList.add(AllocExternalGlobalNodeGen.create(global));
+            writeSymbolsList.add(LLVMWriteSymbolNodeGen.create(global));
         }
 
-        this.writeSymbols = LLVMWriteSymbolNodeGen.create();
+        this.writeSymbols = writeSymbolsList.toArray(LLVMWriteSymbolNode.EMPTY);
         this.allocExternalSymbols = allocExternaSymbolsList.toArray(AllocExternalSymbolNode.EMPTY);
     }
 
@@ -126,7 +132,7 @@ public final class InitializeExternalNode extends LLVMNode {
             if (pointer == null) {
                 continue;
             }
-            writeSymbols.execute(pointer, function.symbol);
+            writeSymbols[i].execute(pointer);
         }
     }
 

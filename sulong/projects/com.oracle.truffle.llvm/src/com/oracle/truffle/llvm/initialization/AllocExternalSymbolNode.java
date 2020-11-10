@@ -211,18 +211,14 @@ public abstract class AllocExternalSymbolNode extends LLVMNode {
 
                 @CompilerDirectives.TruffleBoundary
                 @Specialization(guards = {"localScope.get(symbol.getName()) == null", "globalScope.get(symbol.getName()) == null",
-                                "!symbol.isDefined()", "!intrinsicProvider.isIntrinsified(symbol.getName())", "nfiContextExtension != null",
+                                "!intrinsicProvider.isIntrinsified(symbol.getName())", "nfiContextExtension != null",
                                 "symbol.isGlobalVariable()"})
                 LLVMPointer allocateNativeGlobal(@SuppressWarnings("unused") LLVMLocalScope localScope,
                                 @SuppressWarnings("unused") LLVMScope globalScope,
                                 @SuppressWarnings("unused") LLVMIntrinsicProvider intrinsicProvider,
-                                NFIContextExtension nfiContextExtension,
-                                @CachedContext(LLVMLanguage.class) LLVMContext context) {
-                    NFIContextExtension.NativePointerIntoLibrary pointer = nfiContextExtension.getNativeHandle(context, symbol.getName());
+                                NFIContextExtension nfiContextExtension) {
+                    NFIContextExtension.NativePointerIntoLibrary pointer = nfiContextExtension.getNativeHandle(symbol.getName());
                     if (pointer != null) {
-                        if (!symbol.isDefined()) {
-                            symbol.asGlobalVariable().define(pointer.getLibrary());
-                        }
                         return LLVMNativePointer.create(pointer.getAddress());
                     }
                     return null;
@@ -240,21 +236,23 @@ public abstract class AllocExternalSymbolNode extends LLVMNode {
             abstract static class AllocExternalFunctionNode extends AllocExistingGlobalSymbolsNode {
 
                 private final NodeFactory nodeFactory;
+                private final LLVMFunctionCode functionCode;
 
-                AllocExternalFunctionNode(LLVMSymbol symbol, NodeFactory nodeFactory) {
+                AllocExternalFunctionNode(LLVMSymbol symbol, LLVMFunctionCode functionCode, NodeFactory nodeFactory) {
                     super(symbol);
+                    this.functionCode = functionCode;
                     this.nodeFactory = nodeFactory;
                 }
 
                 @CompilerDirectives.TruffleBoundary
                 @Specialization(guards = {"intrinsicProvider != null", "localScope.get(symbol.getName()) == null", "globalScope.get(symbol.getName()) == null",
-                                "!symbol.isDefined()", "intrinsicProvider.isIntrinsified(symbol.getName())", "symbol.isFunction()"})
+                                "intrinsicProvider.isIntrinsified(symbol.getName())", "symbol.isFunction()"})
                 LLVMPointer allocateIntrinsicFunction(@SuppressWarnings("unused") LLVMLocalScope localScope,
                                 @SuppressWarnings("unused") LLVMScope globalScope,
                                 LLVMIntrinsicProvider intrinsicProvider,
                                 @SuppressWarnings("unused") NFIContextExtension nfiContextExtension,
                                 @CachedContext(LLVMLanguage.class) LLVMContext context) {
-                    LLVMFunctionDescriptor functionDescriptor = context.createFunctionDescriptor(symbol.asFunction());
+                    LLVMFunctionDescriptor functionDescriptor = context.createFunctionDescriptor(symbol.asFunction(), functionCode);
                     functionDescriptor.getFunctionCode().define(intrinsicProvider, nodeFactory);
                     return LLVMManagedPointer.create(functionDescriptor);
                 }
@@ -269,17 +267,17 @@ public abstract class AllocExternalSymbolNode extends LLVMNode {
                  */
                 @CompilerDirectives.TruffleBoundary
                 @Specialization(guards = {"localScope.get(symbol.getName()) == null", "globalScope.get(symbol.getName()) == null",
-                                "!symbol.isDefined()", "!intrinsicProvider.isIntrinsified(symbol.getName())", "nfiContextExtension != null",
+                                "!intrinsicProvider.isIntrinsified(symbol.getName())", "nfiContextExtension != null",
                                 "symbol.isFunction()"})
                 LLVMPointer allocateNativeFunction(@SuppressWarnings("unused") LLVMLocalScope localScope,
                                 @SuppressWarnings("unused") LLVMScope globalScope,
                                 @SuppressWarnings("unused") LLVMIntrinsicProvider intrinsicProvider,
                                 NFIContextExtension nfiContextExtension,
                                 @CachedContext(LLVMLanguage.class) LLVMContext context) {
-                    NFIContextExtension.NativeLookupResult nativeFunction = nfiContextExtension.getNativeFunctionOrNull(context, symbol.getName());
+                    NFIContextExtension.NativeLookupResult nativeFunction = nfiContextExtension.getNativeFunctionOrNull(symbol.getName());
                     if (nativeFunction != null) {
-                        LLVMFunctionDescriptor functionDescriptor = context.createFunctionDescriptor(symbol.asFunction());
-                        functionDescriptor.getFunctionCode().define(nativeFunction.getLibrary(), new LLVMFunctionCode.NativeFunction(nativeFunction.getObject()));
+                        LLVMFunctionDescriptor functionDescriptor = context.createFunctionDescriptor(symbol.asFunction(), new LLVMFunctionCode(symbol.asFunction()));
+                        functionDescriptor.getFunctionCode().define(new LLVMFunctionCode.NativeFunction(nativeFunction.getObject()));
                         return LLVMManagedPointer.create(functionDescriptor);
                     }
                     return null;
